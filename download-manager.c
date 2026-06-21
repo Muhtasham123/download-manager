@@ -12,6 +12,48 @@
 #include <openssl/err.h>
 #include<unistd.h>
 
+char from_hex(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return 0;
+}
+
+void url_decode(char *dst, const char *src) {
+    while (*src) {
+        if (*src == '%' && src[1] && src[2]) {
+            char high = from_hex(src[1]);
+            char low  = from_hex(src[2]);
+            *dst++ = (char)((high << 4) | low);
+            src += 3;
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+}
+
+void extract_content_type(char* response, char* content_type){
+    char* content_type_pointer = strstr(response, "Content-Type: ");
+
+    if(content_type_pointer == NULL){
+        printf("Content-Type header not found");
+        exit(1);
+    }
+
+    char* content_type_value_pointer = content_type_pointer + 14;
+    content_type[100];
+
+    int i;
+    for(i = 0; *(content_type_value_pointer + i) != ';' && *(content_type_value_pointer + i) != '\n'; i++){
+        content_type[i] = *(content_type_value_pointer + i);
+    }
+    content_type[i] = '\0';
+}
+
 void send_request(
     char* path, 
     char* domain, 
@@ -61,7 +103,7 @@ void send_request(
     SSL_write(*ssl, http_request, strlen(http_request));
 }
 
-void get_response(char *response, int response_size, char** body, char* status_code, SSL *ssl){
+int get_response(char *response, int response_size, char** body, char* status_code, SSL *ssl){
     int total = 0;
     int n_bytes;
 
@@ -71,7 +113,7 @@ void get_response(char *response, int response_size, char** body, char* status_c
         total += n_bytes;
     }//reading response
 
-    response[total] = '\0';
+    //response[total] = '\0';
 
     *body = strstr(response, "\r\n\r\n"); //splitting response and body
 
@@ -87,6 +129,9 @@ void get_response(char *response, int response_size, char** body, char* status_c
     }
     status_code[3] = '\0';
     printf("Status code : %s\n", status_code);
+
+    printf("\n%s\n", response);
+    return total - (*body - response); 
 }
 
 int main(){
@@ -213,11 +258,12 @@ int main(){
     //  Receiving requested data
     //-------------------------------------------
 
-    char response[65536]; 
+    char response[1000000]; 
     char *body = NULL;
     char status_code[4];
+    int total_size;
 
-    get_response(response, sizeof(response), &body, status_code, ssl);
+    total_size = get_response(response, sizeof(response), &body, status_code, ssl);
     if(strcmp(status_code, "200") == 0){
         printf("Download complete\n");
     }
@@ -247,7 +293,7 @@ int main(){
         response[0] = '\0'; //empty buffers
         body = NULL;
         status_code[0] = '\0';
-        get_response(response, sizeof(response), &body, status_code, ssl); //reading data again
+        total_size = get_response(response, sizeof(response), &body, status_code, ssl); //reading data again
 
         if(strcmp(status_code, "200") == 0){
             printf("Download complete\n");
@@ -257,8 +303,82 @@ int main(){
         }
     }
 
-    printf("\nHeader:\n%s\n", response);
-    printf("\nBody:\n%s\n", body);
+    //-------------------------------------------------------------------------------
+    //  Exracting Content-Disposition header and Content-Type header from response
+    //-------------------------------------------------------------------------------
+
+    char* content_disposition_pointer = strstr(response, "Content-Disposition: ");
+    char content_type[100];
+    char* filename_pointer = NULL;
+    char *file_name = malloc(1000);
+
+    if(content_disposition_pointer == NULL){
+        extract_content_type(response, content_type);
+
+    }else{
+        filename_pointer = strstr(content_disposition_pointer, "filename*=");
+
+        if(filename_pointer == NULL){
+            extract_content_type(response, content_type);
+
+        }else{
+            filename_pointer += 10;
+
+            if (strncmp(filename_pointer, "UTF-8''", 7) == 0) {
+                filename_pointer += 7;
+            }
+
+            int index;
+            for(index = 0; *(filename_pointer + index) != ';'&&
+             *(filename_pointer + index) != '\r' && 
+             *(filename_pointer + index) != '\n'; index++){
+
+                file_name[index] = *(filename_pointer + index);
+            }
+            file_name[index] = '\0';
+
+            url_decode(file_name, file_name);
+            printf("file name : %s\n", file_name);
+        }
+
+    }
+
+    //------------------------------------------------
+    //  Creating file and writting data to it
+    //------------------------------------------------
+
+    FILE* file_ptr;
+
+    if(content_disposition_pointer == NULL || filename_pointer == NULL){
+        if(strncmp(content_type, "image/jpeg", 10) == 0){
+            file_name = "image.jpeg";
+        }else if(strncmp(content_type, "text/plain", 10) == 0){
+            file_name = "file.txt";
+        }else if(strncmp(content_type, "audio/mpeg", 10) == 0){
+            file_name = "file.mp3";
+        }else if(strncmp(content_type, "application/zip", 15) == 0){
+            file_name = "file.zip";
+        }else if(strncmp(content_type, "text/csv", 8) == 0){
+            file_name = "file.csv";
+        }else if(strncmp(content_type, "text/pptx", 9) == 0){
+            file_name = "file.pptx";
+        }else if(strncmp(content_type, "text/docx", 9) == 0){
+            file_name = "file.docx";
+        }else if(strncmp(content_type, "application/pdf", 15) == 0){
+            file_name = "file.pdf";
+        }
+        else{
+            file_name = "output.bin";
+        }
+    }
+
+    file_ptr = fopen(file_name, "wb");
+    int bytes = fwrite(body, 1, total_size, file_ptr);
+
+    if(file_ptr == NULL){
+        printf("Failed to open file\n");
+        exit(1);
+    }
 
     SSL_shutdown(ssl);
     SSL_free(ssl);
